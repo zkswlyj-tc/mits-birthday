@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MITS Birthday</title>
+    <style>
+      body {
+        margin: 0;
+        background: #000;
+        color: #0f0;
+        font-family: "Courier New", monospace;
+      }
+      .wrap {
+        max-width: 920px;
+        margin: 16px auto;
+        padding: 0 12px;
+      }
+      .hud {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 6px;
+        font-size: 14px;
+        text-shadow: 0 0 6px #0f0;
+      }
+      .panel {
+        border: 2px solid #0f0;
+        padding: 4px;
+        position: relative;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+      .hint {
+        margin-top: 8px;
+        font-size: 12px;
+        color: #0f0;
+        text-shadow: 0 0 4px #0f0;
+      }
+      /* retro scanlines */
+      body::before {
+        content: \"\";
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: repeating-linear-gradient(
+          to bottom,
+          rgba(0, 255, 0, 0.08) 0,
+          rgba(0, 0, 0, 0) 2px
+        );
+        pointer-events: none;
+        z-index: 99;
+      }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/p5@1.9.0/lib/p5.min.js"></script>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="top">
+        <div class="badge">
+          <span>Aim Your Age</span> • <b>MITS</b> •
+          <span>Level 19</span>
+        </div>
+        <div class="badge">
+          Controls: <kbd>Mouse</kbd> shoot • <kbd>E</kbd> hold to defuse •
+          <kbd>X</kbd> ult • <kbd>R</kbd> reset
+        </div>
+      </div>
+      <div class="panel" id="mount"><!-- canvas --></div>
+      <div class="hint">
+        Get <b>19 frags</b> to unlock the cake–spike. Then <kbd>E</kbd> to
+        “defuse” it. No copyrighted assets.
+      </div>
+    </div>
+
+    <script>
+      /* ======================= CONFIG ======================= */
+      const CONFIG = {
+        name: "mits",
+        age: 19,
+        canvas: { w: 900, h: 520 },
+        targetMin: 16,
+        targetMax: 30, // target radius range
+        spawnEvery: 60, // frames between spawns
+        maxTargets: 6,
+        winFrags: 19,
+        ultSlowmo: 0.35, // time scale during ult
+        ultDuration: 360, // frames
+      };
+
+      /* ======================= STATE ======================== */
+      let score = 0,
+        misses = 0,
+        bullets = [];
+      let targets = [];
+      let confetti = [];
+      let crosshair = { x: 0, y: 0, recoil: 0 };
+      let lastSpawn = 0;
+      let spikeUnlocked = false;
+      let defusing = false;
+      let defuseHold = 0; // 0..100
+      let ult = { active: false, timer: 0, meter: 100 }; // meter 0..100
+      let gameOver = false;
+      let toast = "";
+      let toastTimer = 0;
+
+      /* ======================= P5 SETUP ===================== */
+      new p5((p) => {
+        p.setup = () => {
+          p.createCanvas(CONFIG.canvas.w, CONFIG.canvas.h).parent(
+            document.getElementById("mount")
+          );
+          p.textFont(
+            "Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+          );
+          p.colorMode(p.HSL);
+        };
+
+        p.draw = () => {
+          // bg
+          p.background(228, 44, 8); // deep blue
+
+          // time scale for ult
+          const tscale = ult.active ? CONFIG.ultSlowmo : 1;
+
+          // subtle grid
+          drawGrid(p);
+
+          // spawn targets
+          if (
+            !gameOver &&
+            p.frameCount - lastSpawn >
+              CONFIG.spawnEvery * (ult.active ? 1.4 : 1.0) &&
+            targets.length < CONFIG.maxTargets
+          ) {
+            targets.push(makeTarget(p));
+            lastSpawn = p.frameCount;
+          }
+
+          // update & draw targets
+          for (let i = targets.length - 1; i >= 0; i--) {
+            const T = targets[i];
+            T.x += T.vx * tscale;
+            T.y += T.vy * tscale;
+            T.life -= 1 * tscale;
+            T.vx += p.sin(p.frameCount * 0.02 + T.seed) * 0.02 * tscale;
+            T.vy += p.cos(p.frameCount * 0.025 + T.seed) * 0.02 * tscale;
+            if (ult.active) T.r = p.lerp(T.r, T.baseR * 1.35, 0.12);
+            drawTarget(p, T);
+            if (T.life <= 0) {
+              targets.splice(i, 1);
+              misses++;
+              recoil(5);
+            }
+          }
+
+          // bullets
+          for (let i = bullets.length - 1; i >= 0; i--) {
+            const B = bullets[i];
+            B.x += B.vx * tscale;
+            B.y += B.vy * tscale;
+            B.life -= 1 * tscale;
+            p.stroke(0, 0, 90, 0.6);
+            p.line(B.x, B.y, B.x - B.vx * 2, B.y - B.vy * 2);
+            if (B.life <= 0) bullets.splice(i, 1);
+          }
+
+          // confetti (post-win)
+          confetti.forEach((c) => {
+            c.vy += 0.02;
+            c.x += c.vx;
+            c.y += c.vy;
+            c.rot += c.spin;
+            p.push();
+            p.translate(c.x, c.y);
+            p.rotate(c.rot);
+            p.noStroke();
+            p.fill(c.h, 80, 60);
+            p.rect(-c.s / 2, -c.s / 2, c.s, c.s / 2);
+            p.pop();
+          });
+          confetti = confetti.filter((c) => c.y < p.height + 30);
+
+          // crosshair & HUD
+          crosshair.x = p.mouseX + (Math.random() - 0.5) * crosshair.recoil;
+          crosshair.y = p.mouseY + (Math.random() - 0.5) * crosshair.recoil;
+          crosshair.recoil = p.max(0, crosshair.recoil - 0.25);
+          drawHUD(p);
+          drawCrosshair(p, crosshair.x, crosshair.y);
+
+          // toasts
+          if (toastTimer > 0) {
+            p.push();
+            p.textAlign(p.CENTER, p.CENTER);
+            p.fill(0, 0, 92);
+            p.textSize(16);
+            p.text(toast, p.width / 2, p.height - 18);
+            p.pop();
+            toastTimer--;
+          }
+
+          // ult timer/meter
+          if (ult.active) {
+            ult.timer -= 1;
+            if (ult.timer <= 0) ult.active = false;
+          } else {
+            ult.meter = p.min(100, ult.meter + 0.06); // slow recharge
+          }
+
+          // spike/defuse
+          if (spikeUnlocked) drawSpike(p);
+        };
+
+        p.mousePressed = () => {
+          if (gameOver) return;
+
+          // shoot
+          recoil(8);
+          const bSpeed = 18,
+            angle = Math.atan2(p.mouseY - p.height / 2, p.mouseX - p.width / 2);
+          bullets.push({
+            x: crosshair.x,
+            y: crosshair.y,
+            vx: Math.cos(angle) * bSpeed,
+            vy: Math.sin(angle) * bSpeed,
+            life: 10,
+          });
+
+          // hit detection
+          let hit = false;
+          for (let i = targets.length - 1; i >= 0; i--) {
+            const T = targets[i];
+            const d = p.dist(crosshair.x, crosshair.y, T.x, T.y);
+            if (d <= T.r) {
+              score++;
+              hit = true;
+              spawnPop(p, T.x, T.y, T.h);
+              targets.splice(i, 1);
+            }
+          }
+          if (!hit) misses++;
+          if (score >= CONFIG.winFrags && !spikeUnlocked) {
+            spikeUnlocked = true;
+            toastShow("Spike (cake) revealed! Hold E to defuse 🎂");
+            sprinkleConfetti(p, 60);
+          }
+        };
+
+        p.keyPressed = () => {
+          if (p.key === "x" || p.key === "X") tryUlt();
+          if (p.key === "r" || p.key === "R") resetGame();
+          if (p.key === "e" || p.key === "E") defusing = true;
+        };
+        p.keyReleased = () => {
+          if (p.key === "e" || p.key === "E") defusing = false;
+        };
+      });
+
+      /* ==================== DRAW HELPERS ==================== */
+      function drawGrid(p) {
+        p.push();
+        p.stroke(230, 20, 20, 0.06);
+        for (let x = 0; x < p.width; x += 40) p.line(x, 0, x, p.height);
+        for (let y = 0; y < p.height; y += 40) p.line(0, y, p.width, y);
+        p.pop();
+      }
+      function drawHUD(p) {
+        // top bar
+        p.push();
+        p.noStroke();
+        p.fill(228, 44, 4, 0.6);
+        p.rect(0, 0, p.width, 50);
+        p.fill(0, 0, 92);
+        p.textSize(14);
+        p.textAlign(p.LEFT, p.CENTER);
+        p.text(
+          `MATCH MVP: ${CONFIG.name.toUpperCase()} — Age ${CONFIG.age}`,
+          16,
+          25
+        );
+        p.textAlign(p.RIGHT, p.CENTER);
+        p.text(
+          `Frags ${score}/${CONFIG.winFrags}  •  Misses ${misses}`,
+          p.width - 16,
+          25
+        );
+        // ult meter
+        p.push();
+        p.translate(p.width / 2 - 100, 16);
+        p.fill(0, 0, 100, 0.12);
+        p.rect(0, 0, 200, 18, 9);
+        p.fill(350, 92, 56);
+        p.rect(0, 0, 2 * ult.meter, 18, 9);
+        p.fill(0, 0, 92);
+        p.textAlign(p.CENTER, p.CENTER);
+        p.text("ULT (X)", 100, 9);
+        p.pop();
+        p.pop();
+      }
+      function drawCrosshair(p, x, y) {
+        p.push();
+        p.translate(x, y);
+        p.stroke(0, 0, 92);
+        p.strokeWeight(2);
+        const gap = 8 + crosshair.recoil * 0.2;
+        p.line(-gap - 10, 0, -gap, 0);
+        p.line(gap, 0, gap + 10, 0);
+        p.line(0, -gap - 10, 0, -gap);
+        p.line(0, gap, gap * 0 + 0, gap + 10);
+        p.noFill();
+        p.stroke(0, 0, 60, 0.4);
+        p.circle(0, 0, 22 + crosshair.recoil * 0.3);
+        p.pop();
+      }
+      function drawTarget(p, T) {
+        p.push();
+        p.translate(T.x, T.y);
+        p.noStroke();
+        p.fill(T.h, 80, 60);
+        p.circle(0, 0, T.r * 2);
+        p.fill(0, 0, 90);
+        p.circle(0, 0, T.r * 0.6);
+        p.fill(0, 0, 10);
+        p.circle(0, 0, T.r * 0.25);
+        p.pop();
+      }
+      function makeTarget(p) {
+        const edge = Math.floor(Math.random() * 4);
+        let x, y, vx, vy;
+        const speed = 1.5 + Math.random() * 1.2;
+        if (edge === 0) {
+          x = -20;
+          y = p.random(p.height);
+          vx = speed;
+          vy = p.random(-1, 1);
+        }
+        if (edge === 1) {
+          x = p.width + 20;
+          y = p.random(p.height);
+          vx = -speed;
+          vy = p.random(-1, 1);
+        }
+        if (edge === 2) {
+          x = p.random(p.width);
+          y = -20;
+          vx = p.random(-1, 1);
+          vy = speed;
+        }
+        if (edge === 3) {
+          x = p.random(p.width);
+          y = p.height + 20;
+          vx = p.random(-1, 1);
+          vy = -speed;
+        }
+        const baseR = Math.round(p.random(CONFIG.targetMin, CONFIG.targetMax));
+        return {
+          x,
+          y,
+          vx,
+          vy,
+          r: baseR,
+          baseR,
+          life: 900,
+          seed: p.random(999),
+          h: Math.round(p.random(0, 360)),
+        };
+      }
+      function spawnPop(p, x, y, h) {
+        // tiny shards
+        for (let i = 0; i < 12; i++) {
+          bullets.push({
+            x,
+            y,
+            vx: (Math.random() - 0.5) * 6,
+            vy: (Math.random() - 0.5) * 6,
+            life: 8,
+          });
+        }
+        toastShow(randomLine());
+        if (score === CONFIG.winFrags)
+          toastShow(`ACE! ${CONFIG.name.toUpperCase()} turns ${CONFIG.age}!`);
+      }
+      function recoil(amount) {
+        crosshair.recoil = Math.min(18, crosshair.recoil + amount);
+      }
+      function toastShow(t) {
+        toast = t;
+        toastTimer = 120;
+      }
+      function randomLine() {
+        const lines = [
+          "clean one-tap",
+          "headshot? headshot.",
+          "nice swing",
+          "pre-aim diff",
+          "utility? nah, raw aim",
+          "reload cancelled by confidence",
+        ];
+        return lines[Math.floor(Math.random() * lines.length)];
+      }
+
+      /* ==================== SPIKE / CAKE ==================== */
+      function drawSpike(p) {
+        // Base plate
+        const cx = p.width / 2,
+          cy = p.height - 80;
+        p.push();
+        p.textAlign(p.CENTER, p.CENTER);
+        p.noStroke();
+        p.fill(0, 0, 90, 0.1);
+        p.ellipse(cx, cy + 36, 260, 34);
+        // “Spike” that is clearly a cake
+        p.fill(350, 80, 60);
+        p.rect(cx - 120, cy - 40, 240, 80, 18); // cake
+        p.fill(330, 90, 70);
+        p.rect(cx - 130, cy - 60, 260, 36, 18); // icing
+        for (let i = 0; i < 6; i++) {
+          let dx = -100 + i * 40;
+          p.rect(cx + dx, cy - 24, 18, 22, 6);
+        } // drips
+
+        // DEFUSE bar
+        p.fill(0, 0, 100, 0.12);
+        p.rect(cx - 120, cy + 60, 240, 14, 7);
+        if (defusing) defuseHold = Math.min(100, defuseHold + 0.8);
+        else defuseHold = Math.max(0, defuseHold - 1.2);
+        p.fill(120, 80, 50);
+        p.rect(cx - 120, cy + 60, 2.4 * defuseHold, 14, 7);
+
+        p.fill(0, 0, 92);
+        p.textSize(14);
+        p.text(
+          defuseHold < 100
+            ? "Hold E to DEFUSE cake"
+            : "HAPPY BIRHDAY MIDGET MITS! I LOB U, TOUCH SOME GRASS",
+          cx,
+          cy + 60
+        );
+
+        // done?
+        if (defuseHold >= 100 && !gameOver) {
+          gameOver = true;
+          celebrate(p);
+        }
+        p.pop();
+      }
+      function celebrate(p) {
+        toastShow(
+          `MATCH MVP: ${CONFIG.name.toUpperCase()} • ${CONFIG.age} YEARS OLD 🎉`
+        );
+        sprinkleConfetti(p, 160);
+      }
+
+      /* ==================== ULT ==================== */
+      function tryUlt() {
+        if (!ult.active && ult.meter >= 100) {
+          ult.active = true;
+          ult.timer = CONFIG.ultDuration;
+          ult.meter = 0;
+          toastShow("ULT READY → ULT USED (X). time dilated, targets bigger.");
+        }
+      }
+
+      /* ==================== CONFETTI ==================== */
+      function sprinkleConfetti(p, n) {
+        for (let i = 0; i < n; i++) {
+          confetti.push({
+            x: p.random(p.width),
+            y: -20,
+            vx: p.random(-1, 1),
+            vy: p.random(2, 5),
+            s: p.random(6, 10),
+            h: p.random(0, 360),
+            rot: p.random(p.TWO_PI),
+            spin: p.random(-0.1, 0.1),
+          });
+        }
+      }
+
+      /* ==================== RESET ==================== */
+      function resetGame() {
+        score = 0;
+        misses = 0;
+        bullets = [];
+        targets = [];
+        confetti = [];
+        spikeUnlocked = false;
+        defusing = false;
+        defuseHold = 0;
+        gameOver = false;
+        ult = { active: false, timer: 0, meter: 100 };
+        toast = "";
+        toastTimer = 0;
+        lastSpawn = 0;
+      }
+    </script>
+  </body>
+</html>
